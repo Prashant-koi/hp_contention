@@ -16,6 +16,7 @@ Each is evaluated with:
 
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -24,6 +25,13 @@ from sklearn.metrics import (accuracy_score, precision_score,
                              recall_score, f1_score, classification_report)
 import warnings
 warnings.filterwarnings("ignore")
+
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    print("Matplotlib not found. Run:  pip install matplotlib")
+    MATPLOTLIB_AVAILABLE = False
 
 # import XGBoost
 try:
@@ -35,6 +43,7 @@ except ImportError:
 
 # 1.  LOAD DATA
 DATA_PATH = "hp_contention_dataset.csv"
+OUTPUT_DIR = Path("outputs")
 
 print("=" * 65)
 print("LOADING DATA")
@@ -125,6 +134,82 @@ def run_splits_and_cv(name, model, X, y):
     return results
 
 
+def save_comparison_table(comparison_df, output_dir):
+    """Save the split comparison as CSV and as a matplotlib table image."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = output_dir / "model_comparison_by_split.csv"
+    png_path = output_dir / "model_comparison_by_split.png"
+
+    comparison_df.to_csv(csv_path)
+    print(f"\nSaved comparison CSV: {csv_path}")
+
+    if not MATPLOTLIB_AVAILABLE:
+        print("Skipped table image export because matplotlib is unavailable.")
+        return
+
+    display_df = comparison_df.copy().map(lambda x: f"{x:.4f}")
+    row_labels = [[model, split] for model, split in display_df.index]
+    cell_text = [[model, split, *values] for (model, split), values in zip(row_labels, display_df.values)]
+    col_labels = ["Model", "Split", *display_df.columns.tolist()]
+
+    fig_height = max(2.6, 0.85 + 0.5 * len(display_df))
+    fig, ax = plt.subplots(figsize=(10, fig_height))
+    ax.axis("off")
+
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=col_labels,
+        cellLoc="center",
+        rowLoc="center",
+        loc="center",
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 1.45)
+
+    for (row, col), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_facecolor("#dbeafe")
+            cell.set_text_props(weight="bold")
+        if col == -1:
+            cell.set_facecolor("#f3f4f6")
+            cell.set_text_props(weight="bold")
+
+    ax.set_title("Model Comparison by Split", fontsize=13, fontweight="bold", pad=14)
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved comparison image: {png_path}")
+
+
+def save_feature_importance_chart(importances, output_dir):
+    """Save the Random Forest feature importances as a bar chart."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not MATPLOTLIB_AVAILABLE:
+        print("Skipped feature importance image export because matplotlib is unavailable.")
+        return
+
+    sorted_importances = importances.sort_values(ascending=True)
+    fig_height = max(3.6, 0.55 * len(sorted_importances) + 1.2)
+    fig, ax = plt.subplots(figsize=(9, fig_height))
+    ax.barh(sorted_importances.index, sorted_importances.values, color="#2563eb")
+    ax.set_xlabel("Importance")
+    ax.set_title("Random Forest Feature Importances", fontsize=13, fontweight="bold", pad=12)
+    ax.grid(axis="x", linestyle="--", alpha=0.3)
+
+    for i, value in enumerate(sorted_importances.values):
+        ax.text(value + 0.005, i, f"{value:.3f}", va="center", fontsize=9)
+
+    fig.tight_layout()
+    png_path = output_dir / "random_forest_feature_importance.png"
+    fig.savefig(png_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved feature importance image: {png_path}")
+
+
 # 4.  ALGORITHM 1 — LOGISTIC REGRESSION
 print("\n\n" + "=" * 65)
 print("ALGORITHM 1: LOGISTIC REGRESSION")
@@ -148,6 +233,7 @@ print("\n  Feature Importances (higher = more predictive):")
 for feat, imp in importances.sort_values(ascending=False).items():
     bar = "█" * int(imp * 40)
     print(f"    {feat:<30} {imp:.4f}  {bar}")
+save_feature_importance_chart(importances, OUTPUT_DIR)
 
 # 6.  ALGORITHM 3 — XGBOOST
 print("\n\n" + "=" * 65)
@@ -177,17 +263,31 @@ else:
 
 # 7.  FINAL COMPARISON TABLE
 print("\n\n" + "=" * 65)
-print("FINAL COMPARISON with 80/20 split")
+print("FINAL COMPARISON by model and split")
 print("=" * 65)
 
-all_80_20 = []
+all_split_results = []
 for results in [lr_results, rf_results, xgb_results]:
     if results:
-        # grab the 80/20 result (index 1)
-        all_80_20.append(results[1])
+        for result in results:
+            model_name, split_label = result["model"].rsplit(" (", 1)
+            split_label = split_label.rstrip(")")
+            all_split_results.append({
+                "model": model_name,
+                "split": split_label,
+                "accuracy": result["accuracy"],
+                "precision": result["precision"],
+                "recall": result["recall"],
+                "f1": result["f1"],
+            })
 
-if all_80_20:
-    comparison = pd.DataFrame(all_80_20).set_index("model")
-    comparison = comparison.map(lambda x: f"{x:.4f}")
-    print(comparison.to_string())
-
+if all_split_results:
+    comparison = pd.DataFrame(all_split_results)
+    comparison["split"] = pd.Categorical(
+        comparison["split"],
+        categories=["70/30 split", "80/20 split"],
+        ordered=True,
+    )
+    comparison = comparison.sort_values(["model", "split"]).set_index(["model", "split"])
+    print(comparison.map(lambda x: f"{x:.4f}").to_string())
+    save_comparison_table(comparison, OUTPUT_DIR)
