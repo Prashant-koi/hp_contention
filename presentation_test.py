@@ -17,6 +17,7 @@ Each is evaluated with:
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import matplotlib
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -27,6 +28,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 try:
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
@@ -44,6 +46,8 @@ except ImportError:
 # 1.  LOAD DATA
 DATA_PATH = "hp_contention_dataset.csv"
 OUTPUT_DIR = Path("outputs")
+CROSS_GPU_MIN_SAMPLES = 100
+CROSS_GPU_RF_TREES = 50
 
 print("=" * 65)
 print("LOADING DATA")
@@ -210,6 +214,51 @@ def save_feature_importance_chart(importances, output_dir):
     print(f"Saved feature importance image: {png_path}")
 
 
+def save_cross_gpu_heatmap(cross_gpu_df, output_dir):
+    """Save a heatmap for cross-GPU F1 scores."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = output_dir / "cross_gpu_generalization.csv"
+    cross_gpu_df.to_csv(csv_path)
+    print(f"Saved cross-GPU CSV: {csv_path}")
+
+    if not MATPLOTLIB_AVAILABLE or cross_gpu_df.empty:
+        if cross_gpu_df.empty:
+            print("Skipped cross-GPU image export because no train/test pairs met the sample threshold.")
+        else:
+            print("Skipped cross-GPU image export because matplotlib is unavailable.")
+        return
+
+    heatmap_df = cross_gpu_df.pivot(index="train_gpu", columns="test_gpu", values="f1")
+
+    fig_width = max(7, 1.2 * len(heatmap_df.columns) + 2)
+    fig_height = max(5, 0.9 * len(heatmap_df.index) + 1.5)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    matrix = heatmap_df.to_numpy(dtype=float)
+    im = ax.imshow(matrix, cmap="Blues", vmin=0, vmax=1, aspect="auto")
+    ax.set_xticks(range(len(heatmap_df.columns)))
+    ax.set_yticks(range(len(heatmap_df.index)))
+    ax.set_xticklabels(heatmap_df.columns, rotation=30, ha="right")
+    ax.set_yticklabels(heatmap_df.index)
+    ax.set_xlabel("Test GPU")
+    ax.set_ylabel("Train GPU")
+    ax.set_title("Cross-GPU Generalization (F1)", fontsize=13, fontweight="bold", pad=12)
+
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            value = matrix[i, j]
+            if not np.isnan(value):
+                ax.text(j, i, f"{value:.2f}", ha="center", va="center", color="black", fontsize=9)
+
+    fig.colorbar(im, ax=ax, label="F1 score")
+    fig.tight_layout()
+    png_path = output_dir / "cross_gpu_generalization.png"
+    fig.savefig(png_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved cross-GPU image: {png_path}")
+
+
 # 4.  ALGORITHM 1 — LOGISTIC REGRESSION
 print("\n\n" + "=" * 65)
 print("ALGORITHM 1: LOGISTIC REGRESSION")
@@ -291,3 +340,38 @@ if all_split_results:
     comparison = comparison.sort_values(["model", "split"]).set_index(["model", "split"])
     print(comparison.map(lambda x: f"{x:.4f}").to_string())
     save_comparison_table(comparison, OUTPUT_DIR)
+
+# Cross-GPU Generalization
+print("\n=== CROSS-GPU GENERALIZATION ===")
+print(df['gpu_model'].value_counts(), "\n")
+
+cross_gpu_results = []
+gpu_models = df['gpu_model'].unique()
+
+for train_gpu in gpu_models:
+    for test_gpu in gpu_models:
+        if train_gpu == test_gpu:
+            continue
+
+        train_df = df[df['gpu_model'] == train_gpu]
+        test_df  = df[df['gpu_model'] == test_gpu]
+        if len(train_df) < CROSS_GPU_MIN_SAMPLES or len(test_df) < CROSS_GPU_MIN_SAMPLES:
+            continue
+
+        model = RandomForestClassifier(
+            n_estimators=CROSS_GPU_RF_TREES,
+            random_state=42,
+            n_jobs=-1,
+        )
+        model.fit(train_df[FEATURES], train_df[TARGET])
+        y_pred = model.predict(test_df[FEATURES])
+        f1 = f1_score(test_df[TARGET], y_pred, zero_division=0)
+        print(f"Train: {train_gpu:<20} → Test: {test_gpu:<20} | F1: {f1:.4f}")
+        cross_gpu_results.append({
+            "train_gpu": train_gpu,
+            "test_gpu": test_gpu,
+            "f1": f1,
+        })
+
+if cross_gpu_results:
+    save_cross_gpu_heatmap(pd.DataFrame(cross_gpu_results), OUTPUT_DIR)
